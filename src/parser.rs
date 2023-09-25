@@ -1,4 +1,5 @@
-use crate::parser::ParseError::{EmptyExpression, IllegalState};
+use std::iter::Peekable;
+use crate::parser::ParseError::{EmptyExpression, IllegalState, UnbalancedParenthesis};
 use log::{debug, trace};
 use std::str::Chars;
 
@@ -20,7 +21,7 @@ pub enum ParseError {
     /// The parser encountered an unexpected symbol (unexpected character, parser state, current operation)
     UnexpectedSymbol(String, ParserState, Option<Operation>),
     /// The parser ended in an illegal state
-    IllegalState,
+    IllegalState(String),
 }
 
 /// The legal states the parser can go through
@@ -38,39 +39,56 @@ pub enum ParserState {
 
 /// The parser structure
 pub struct Parser {
-    /// Thje expression to parse
+    /// The expression to parse
     expression: String,
 }
 
 /// The parser implementation
 impl Parser {
-
     /// Instantiate a new parser
     /// # Arguments
     ///  - expression: The expression to aprse
     /// # Return
     /// A `Parser`
     pub fn new(expression: String) -> Self {
-        Self { expression }
+        Self {
+            expression,
+        }
     }
 
     /// Parse process
     /// # Return
     /// A `Result` having the expression result if valid, `ParseError` otherwise
     pub fn parse(&self) -> Result<usize, ParseError> {
-        let data: Chars = self.expression.chars();
-        self.parse_internal(data, 0)
+        let mut data: Peekable<Chars> = self.expression.chars().peekable();
+        let open_brackets = data.clone().filter(|c| *c == OPCODE_OPEN).count();
+        let closed_brackets = data.clone().filter(|c| *c == OPCODE_CLOSE).count();
+        match (open_brackets, closed_brackets) {
+            (open_brackets, closed_brackets) if open_brackets > closed_brackets => Err(UnbalancedParenthesis(OPCODE_OPEN.to_string())),
+            (open_brackets, closed_brackets) if closed_brackets > open_brackets => Err(UnbalancedParenthesis(OPCODE_CLOSE.to_string())),
+            _ => {
+                let mut result = None;
+                while data.clone().count() > 0 {
+                    let res = self.parse_internal(&mut data, result)?;
+                    result = Some(res);
+                }
+                result.ok_or(EmptyExpression)
+            }
+        }
+
     }
 
     /// Internal, recursive parse function
-    fn parse_internal(&self, mut data: Chars, level: usize) -> Result<usize, ParseError> {
-        debug!("Parse recursion, level {:?}", level);
+    fn parse_internal(
+        &self,
+        data: &mut Peekable<Chars>,
+        mut result: Option<usize>,
+    ) -> Result<usize, ParseError> {
+        trace!("parse_internal() recursion");
 
         let mut state = ParserState::FirstOperand;
-        let mut result: Option<usize> = None;
         let mut operation: Option<Operation> = None;
         let mut acc = String::new();
-        let mut level = level;
         while let Some(char) = data.next() {
             let is_digit = char.is_ascii_digit();
             let new_state = self.compute_state(state, char.to_owned(), &mut acc)?;
@@ -83,25 +101,30 @@ impl Parser {
                 char if state == ParserState::FirstOperand && is_digit.to_owned() => {
                     acc.push_str(&char.to_string());
                     trace!("a = {:?}", acc);
-                    let temp_result = acc
-                        .parse::<usize>()
-                        .map_err(|err| ParseError::ParseDigitError(acc.clone(), err.to_string()))?;
-                    result = Some(temp_result);
+                    result = Some(acc.parse::<usize>().map_err(|err| {
+                        ParseError::ParseDigitError(acc.clone(), err.to_string())
+                    })?);
                 }
                 char if state == ParserState::SecondOperand && is_digit.to_owned() => {
                     acc.push_str(&char.to_string());
                     trace!("b = {:?}", acc);
-                    result = Some(operation
-                        .clone()
-                        .ok_or(IllegalState)?
-                        .apply(acc.to_string())
-                        .map_err(ParseError::InvalidOperation)?);
+                    result = Some(
+                        operation
+                            .ok_or(IllegalState(
+                                "No operation when evaluating SecondOperand".to_string(),
+                            ))?
+                            .apply(acc.to_string())
+                            .map_err(ParseError::InvalidOperation)?,
+                    );
                 }
                 code @ (OPCODE_ADD | OPCODE_SUB | OPCODE_MUL | OPCODE_DIV)
                     if state == ParserState::Operation =>
                 {
                     operation = if acc.is_empty() {
-                        let first_operand = result.ok_or(ParseError::IllegalState)?;
+                        let first_operand = result.ok_or(ParseError::IllegalState(
+                            "No previous result and accumulator empty instantiating operation"
+                                .to_string(),
+                        ))?;
                         Some(
                             Operation::from_result(code, first_operand)
                                 .map_err(ParseError::InvalidOperation)?,
@@ -115,26 +138,35 @@ impl Parser {
                     trace!("op = {:?}", operation);
                     acc.clear();
                 }
-                OPCODE_OPEN
-                    if state == ParserState::Operation || state == ParserState::FirstOperand =>
-                {
+                OPCODE_OPEN => {
                     trace!(
                         "Open Parenthesis: state = {:?}, operation = {:?}",
                         state,
                         operation
                     );
-                    return match operation {
-                        None => self.parse_internal(data, level + 1),
+                    let res = match operation {
+                        None => self.parse_internal(data, result),
                         Some(operation) => operation
-                            .apply_result(self.parse_internal(data, level + 1)?)
+                            .apply_result(self.parse_internal(data, result)?)
                             .map_err(ParseError::InvalidOperation),
                     };
+                    match data.peek().cloned() {
+                        Some(OPCODE_ADD) | Some(OPCODE_SUB) | Some(OPCODE_MUL) | Some(OPCODE_DIV) => {
+                            result = res.ok();
+                            state = ParserState::FirstOperand;
+                        },
+                        _ => return res,
+                    }
                 }
                 OPCODE_CLOSE if state == ParserState::CloseParenthesis => {
-                    trace!("Close Parenthesis");
-                    level = level
-                        .checked_sub(1)
-                        .ok_or(ParseError::UnbalancedParenthesis(char.to_string()))?;
+                    trace!(
+                        "Close Parenthesis, operation={:?}, result = {:?}",
+                        operation,
+                        result,
+                    );
+                    return result.ok_or(IllegalState(
+                        "Result not available when closing parenthesis".to_string(),
+                    ));
                 }
                 symbol => {
                     return Err(ParseError::UnexpectedSymbol(
@@ -146,12 +178,8 @@ impl Parser {
             }
         }
 
-        debug!("level = {}, result = {:?}", &level, &result);
-        if level == 0 {
-            result.ok_or(EmptyExpression)
-        } else {
-            Err(ParseError::UnbalancedParenthesis(OPCODE_OPEN.to_string()))
-        }
+        debug!("result = {:?}", &result);
+        result.ok_or(EmptyExpression)
     }
 
     /// Compute the new state of the parser
@@ -164,10 +192,11 @@ impl Parser {
         let is_digit = char.is_ascii_digit();
         match state {
             ParserState::FirstOperand if !is_digit.to_owned() => match char {
-                OPCODE_ADD | OPCODE_SUB | OPCODE_MUL | OPCODE_DIV | OPCODE_OPEN => {
+                OPCODE_ADD | OPCODE_SUB | OPCODE_MUL | OPCODE_DIV => {
                     acc.clear();
                     Ok(ParserState::Operation)
                 }
+                OPCODE_OPEN => Ok(ParserState::FirstOperand),
                 OPCODE_CLOSE => {
                     acc.clear();
                     Ok(ParserState::CloseParenthesis)
@@ -191,6 +220,7 @@ impl Parser {
                     acc.clear();
                     Ok(ParserState::Operation)
                 }
+                OPCODE_OPEN => Ok(ParserState::SecondOperand),
                 OPCODE_CLOSE => {
                     acc.clear();
                     Ok(ParserState::CloseParenthesis)
@@ -202,6 +232,7 @@ impl Parser {
                     acc.clear();
                     Ok(ParserState::Operation)
                 }
+                OPCODE_CLOSE => Ok(ParserState::CloseParenthesis),
                 _ => Err(ParseError::UnbalancedParenthesis(char.to_string())),
             },
             ParserState::FirstOperand | ParserState::SecondOperand if is_digit.to_owned() => {
@@ -215,7 +246,10 @@ impl Parser {
 #[cfg(test)]
 mod test {
     use crate::operation::OperationError::OverflowError;
-    use crate::parser::ParseError::{EmptyExpression, InvalidOperation, MalformedExpression, ParseDigitError, UnbalancedParenthesis};
+    use crate::parser::ParseError::{
+        EmptyExpression, InvalidOperation, MalformedExpression, ParseDigitError,
+        UnbalancedParenthesis,
+    };
     use crate::parser::Parser;
 
     #[test]
@@ -281,11 +315,30 @@ mod test {
     }
 
     #[test]
+    fn test_nested_parenthesis() {
+        let expression = "233b3ae4c66fb99ae33ce3a5ff".to_string();
+        let parser = Parser::new(expression);
+        let result = parser.parse().unwrap();
+        assert_eq!(659, result);
+
+        let expression = "eeee5fae3fffcee2fff".to_string();
+        let parser = Parser::new(expression);
+        let result = parser.parse().unwrap();
+        assert_eq!(16, result);
+    }
+
+    #[test]
     fn test_overflow() {
         let expression = "99999999999999999999999999c9".to_string();
         let parser = Parser::new(expression);
         let result = parser.parse();
-        assert_eq!(Err(ParseDigitError("99999999999999999999".to_string(), "number too large to fit in target type".to_string())), result);
+        assert_eq!(
+            Err(ParseDigitError(
+                "99999999999999999999".to_string(),
+                "number too large to fit in target type".to_string()
+            )),
+            result
+        );
 
         let expression = "9c99999999999999999999999999".to_string();
         let parser = Parser::new(expression);

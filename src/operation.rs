@@ -31,7 +31,7 @@ pub enum OperationError {
 }
 
 /// Enumeration of all possible arithmetical operations
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Operation {
     /// Addition (first operand)
     Add(usize),
@@ -45,7 +45,6 @@ pub enum Operation {
 
 /// Implementation of an arithmetical operation
 impl Operation {
-
     /// Creates the `Operation` from a code and the first operand
     /// # Arguments
     ///  - code: An char defined as `OPCODE` constant in the `codes` module
@@ -92,7 +91,7 @@ impl Operation {
 
     /// Applies the `Operation` using a previous result as second operand
     /// # Arguments
-    ///  - second_operand: The previous result
+    ///  - second_operand:  The previous result
     /// # Return
     /// A `Result` having a the arithmetic result of the operation if valid, `OperationError` otherwise
     pub fn apply_result(&self, second_operand: usize) -> Result<usize, OperationError> {
